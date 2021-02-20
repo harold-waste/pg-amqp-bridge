@@ -1,14 +1,20 @@
 extern crate env_logger;
+extern crate openssl;
 extern crate pg_amqp_bridge as bridge;
-extern crate r2d2;
+extern crate postgres_openssl;
+extern crate postgres;
 extern crate r2d2_postgres;
+extern crate r2d2;
 
+use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
+use postgres_openssl::MakeTlsConnector;
+use r2d2_postgres::{PostgresConnectionManager};
+use r2d2::{Pool, ManageConnection};
 use std::env;
+use std::error::Error;
 use std::fs;
 use std::thread;
 use std::time::Duration;
-use r2d2::{Pool, ManageConnection};
-use r2d2_postgres::{TlsMode, PostgresConnectionManager};
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -42,22 +48,25 @@ fn read_env_with_secret(key: &str) -> String {
   }
 }
 
-fn main() {
+fn main() -> std::result::Result<(), Box<dyn Error>> {
   env_logger::init().unwrap();
-  let config = Config::new();
-
+  let app_config = Config::new();
   loop {
-    let pool = wait_for_pg_connection(&config.postgresql_uri);
+    let pool = wait_for_pg_connection(&app_config.postgresql_uri);
     // This functions spawns threads for each pg channel and waits for the threads to finish,
     // that only occurs when the threads die due to a pg connection error
     // and so if that happens the pg connection is retried and the bridge is started again.
-    bridge::start(pool, &config.amqp_uri, &config.bridge_channels, &config.delivery_mode);
+    bridge::start(pool, &app_config.amqp_uri, &app_config.bridge_channels, &app_config.delivery_mode);
   }
 }
 
-fn wait_for_pg_connection(pg_uri: &String) -> Pool<PostgresConnectionManager> {
+fn wait_for_pg_connection(database_url: &str) -> r2d2::Pool<r2d2_postgres::PostgresConnectionManager<MakeTlsConnector>> {
   println!("Attempting to connect to PostgreSQL..");
-  let conn = PostgresConnectionManager::new(pg_uri.to_owned(), TlsMode::None).unwrap();
+  let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
+  builder.set_verify(SslVerifyMode::NONE);
+  let connector = MakeTlsConnector::new(builder.build());
+
+  let conn = PostgresConnectionManager::new(database_url.parse().unwrap(), connector);
   let mut i = 1;
   while let Err(e) = conn.connect() {
     println!("{:?}", e);

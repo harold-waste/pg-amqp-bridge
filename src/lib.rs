@@ -3,10 +3,12 @@ extern crate fallible_iterator;
 extern crate r2d2;
 extern crate r2d2_postgres;
 extern crate postgres;
+extern crate postgres_openssl;
 #[macro_use] extern crate log;
 
 use amqp::{Session, Basic, protocol, Channel, Table, AMQPError};
 use fallible_iterator::FallibleIterator;
+use postgres_openssl::MakeTlsConnector;
 use r2d2::{Pool, PooledConnection};
 use r2d2_postgres::{PostgresConnectionManager};
 use std::default::Default;
@@ -42,9 +44,8 @@ impl ChannelCounter {
 
 const SEPARATOR: char = '|';
 
-pub fn start(pool: Pool<PostgresConnectionManager>, amqp_uri: &str, bridge_channels: &str, delivery_mode: &u8){
+pub fn start(pool: Pool<PostgresConnectionManager<MakeTlsConnector>>, amqp_uri: &str, bridge_channels: &str, delivery_mode: &u8){
   let mut children = Vec::new();
-
   for binding in parse_bridge_channels(bridge_channels){
     children.push(
       spawn_listener_publisher(pool.get().unwrap(), amqp_uri.to_string(), binding, delivery_mode.to_owned()))
@@ -55,7 +56,7 @@ pub fn start(pool: Pool<PostgresConnectionManager>, amqp_uri: &str, bridge_chann
   }
 }
 
-fn spawn_listener_publisher(pg_conn: PooledConnection<PostgresConnectionManager>,
+fn spawn_listener_publisher(mut pg_conn: PooledConnection<PostgresConnectionManager<MakeTlsConnector>>,
                             amqp_uri: String, binding: Binding, delivery_mode: u8) -> JoinHandle<()> {
   thread::spawn(move ||{
 
@@ -78,11 +79,11 @@ fn spawn_listener_publisher(pg_conn: PooledConnection<PostgresConnectionManager>
 
     println!("Listening on {}...", binding.pg_channel);
 
-    let notifications = pg_conn.notifications();
+    let mut notifications = pg_conn.notifications();
     let mut it = notifications.blocking_iter();
 
     while let Ok(Some(notification)) = it.next() {
-      let (routing_key, message) = parse_notification(&notification.payload);
+      let (routing_key, message) = parse_notification(&notification.payload());
       let (exchange, key) =
         if amqp_entity_type == Type::Exchange {
           (binding.amqp_entity.as_str(), routing_key)
